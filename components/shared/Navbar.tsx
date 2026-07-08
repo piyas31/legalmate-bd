@@ -1,15 +1,32 @@
-"use client"; // 💡 এটিকে একটি ক্লায়েন্ট সেফ কম্পোনেন্ট বানালাম
+"use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Scale, Menu } from "lucide-react";
-import { useUser, UserButton } from "@clerk/nextjs"; // 💡 ক্লার্কের ক্লায়েন্ট হুক ও বাটন
+import { useUser, UserButton } from "@clerk/nextjs";
+import { checkAndSyncUser } from "@/db/sync-user"; // 💡 লাইভ ডাটাবেজ থেকে রোল সিঙ্ক করার ফাংশন
 
 export default function Navbar() {
-  // ১. ক্লার্কের হুক দিয়ে লগইন স্ট্যাটাস ও ইউজারের ডাটা নিলাম
-  const { isSignedIn, user, isLoaded } = useUser();
+  const { isSignedIn, isLoaded } = useUser();
+  const [dbRole, setDbRole] = useState<string | null>(null);
 
-  // ২. মেটাডেটা থেকে রোল বের করা (ডাটাবেজ বা সার্ভার কলের কোনো ঝামেলাই নেই)
-  const userRole = user?.unsafeMetadata?.requestedRole || "client";
+  useEffect(() => {
+    const fetchUserRole = async () => {
+      // ইউজার লগইন থাকলে সরাসরি ডাটাবেজ থেকে তার আসল লাইভ রোল নিয়ে আসা হবে
+      if (isSignedIn) {
+        try {
+          const dbUser = (await checkAndSyncUser()) as any;
+          if (dbUser && dbUser.role) {
+            setDbRole(dbUser.role); // 'admin', 'lawyer', বা 'client' সেট হবে
+          }
+        } catch (err) {
+          console.error("💥 Failed to fetch live navbar role:", err);
+        }
+      }
+    };
+
+    fetchUserRole();
+  }, [isSignedIn]);
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-gray-100 bg-white/80 backdrop-blur-md">
@@ -25,13 +42,23 @@ export default function Navbar() {
         <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-gray-600">
           <Link href="/lawyers" className="hover:text-indigo-600 transition-colors">Find Lawyers</Link>
           
-          {/* 💡 জাস্ট রিঅ্যাক্ট কন্ডিশনাল রেন্ডারিং - কোনো SignedIn ট্যাগ লাগবে না */}
-          {isLoaded && isSignedIn && (
+          {/* 🚀 রোল অনুযায়ী ডাইনামিক ড্যাশবোর্ড লিঙ্ক জেনারেশন */}
+          {isLoaded && isSignedIn && dbRole && (
             <>
-              {userRole === "client" ? (
-                <Link href="/dashboard" className="hover:text-indigo-600 transition-colors">Client Dashboard</Link>
-              ) : (
-                <Link href="/lawyer-dashboard" className="hover:text-indigo-600 transition-colors">Lawyer Portal</Link>
+              {dbRole === "admin" && (
+                <Link href="/admin/dashboard" className="text-rose-600 font-semibold hover:text-rose-700 transition-colors flex items-center gap-1">
+                  Admin Dashboard
+                </Link>
+              )}
+              {dbRole === "lawyer" && (
+                <Link href="/lawyer-dashboard" className="hover:text-indigo-600 transition-colors">
+                  Lawyer Portal
+                </Link>
+              )}
+              {dbRole === "client" && (
+                <Link href="/dashboard" className="hover:text-indigo-600 transition-colors">
+                  Client Dashboard
+                </Link>
               )}
             </>
           )}
@@ -40,11 +67,11 @@ export default function Navbar() {
         {/* Auth Buttons */}
         <div className="hidden md:flex items-center gap-4">
           
-          {/* ক্লার্কের ডাটা লোড হওয়া পর্যন্ত ছোট ব্ল্যাঙ্ক স্টেট (ফ্লিকারিং এড়াতে) */}
+          {/* ক্লার্ক লোড হওয়ার আগে ফ্লিকারিং বন্ধের ছোট পালস অ্যানিমেশন */}
           {!isLoaded ? (
             <div className="h-8 w-8 animate-pulse bg-gray-100 rounded-full" />
           ) : !isSignedIn ? (
-            /* ❌ ইউজার লগআউট থাকলে এই বাটনগুলো দেখাবে */
+            /* ❌ লগআউট থাকা অবস্থায় হুবহু আগের মতোই থাকবে */
             <>
               <Link href="/sign-in" className="text-sm font-medium text-gray-700 hover:text-indigo-600 transition-colors mr-2">
                 Sign In
@@ -59,7 +86,7 @@ export default function Navbar() {
               </Link>
             </>
           ) : (
-            /*  ইউজার লগইন থাকলে জিমেইল প্রোফাইল আইকন */
+            /* ✅ লগইন থাকলে ক্লার্ক প্রোফাইল বাটন */
             <UserButton 
               appearance={{
                 elements: {

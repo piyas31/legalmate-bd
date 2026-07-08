@@ -6,7 +6,14 @@ import { useUser } from "@clerk/nextjs";
 import Navbar from "@/components/shared/Navbar";
 import Footer from "@/components/shared/Footer";
 import { checkAndSyncUser } from "@/db/sync-user";
-import { createLawyerProfile, getLawyerProfileStatus } from "@/app/actions/lawyer"; // 🚀 getLawyerProfileStatus অ্যাকশনটি যুক্ত করা হলো
+// 🚀 নতুন সার্ভার অ্যাকশনগুলো ইম্পোর্ট করা হলো ভাই
+import { 
+  createLawyerProfile, 
+  getLawyerProfileStatus, 
+  getLawyerAppointments, 
+  cancelAppointment,
+  approveAppointment
+} from "@/app/actions/lawyer"; 
 import { Calendar, Users, Clock, Check, X, FolderOpen, ShieldAlert, User, AlertCircle, Loader2 } from "lucide-react";
 
 export default function LawyerDashboard() {
@@ -30,28 +37,43 @@ export default function LawyerDashboard() {
   // ডায়নামিক অ্যাপয়েন্টমেন্ট স্টেট
   const [appointments, setAppointments] = useState<any[]>([]);
 
+  // 🚀 লাইভ অ্যাপয়েন্টমেন্ট ডেটাবেজ থেকে লোড করার ফাংশন
+  const loadIncomingBookings = async () => {
+    try {
+      const data = await getLawyerAppointments();
+      setAppointments(data || []);
+    } catch (err) {
+      console.error("Failed to load lawyer appointments:", err);
+    }
+  };
+
   useEffect(() => {
     const initLawyerWorkspace = async () => {
       if (isLoaded && isSignedIn) {
         try {
-          // ১. ইউজার সিঙ্ক করা (ইউজার আইডি পাওয়ার জন্য)
+          // ১. ইউজার সিঙ্ক করা
           const dbUser = (await checkAndSyncUser()) as any;
           
           if (dbUser) {
             setDbUserObj(dbUser);
             
-            // 🚀 আসল ট্রিক: ক্যাশ এড়াতে সার্ভার অ্যাকশনের মাধ্যমে সরাসরি লাইভ ডাটাবেজ স্ট্যাটাস চেক
+            // ২. সার্ভার অ্যাকশনের মাধ্যমে লাইভ ডাটাবেজ স্ট্যাটাস চেক
             const profileStatus = await getLawyerProfileStatus(dbUser.id);
             
             if (profileStatus && profileStatus.exists) {
               setHasProfile(true);
               setIsVerified(profileStatus.isVerified);
               
-              // ডাটা অবজেক্টে প্রোফাইল ডাটা রি-ম্যাপ করে রাখা হলো
               setDbUserObj((prev: any) => ({
                 ...prev,
                 lawyerProfile: profileStatus.profile,
               }));
+
+              // 🚀 লয়ার ভেরিফাইড হলে তার অ্যাপয়েন্টমেন্টগুলো লোড করা হলো ভাই
+              if (profileStatus.isVerified) {
+                const data = await getLawyerAppointments();
+                setAppointments(data || []);
+              }
             } else {
               setHasProfile(false);
               setIsVerified(false);
@@ -73,13 +95,20 @@ export default function LawyerDashboard() {
     setSubmitError(null);
     setSubmitting(true);
 
-    const result = await createLawyerProfile(formData);
+    if (!dbUserObj?.id) {
+      setSubmitError("User authentication failed. Please refresh and try again.");
+      setSubmitting(false);
+      return;
+    }
+
+    const result = await createLawyerProfile({
+      ...formData,
+      userId: dbUserObj.id,
+    });
+
     if (result.success) {
-      // 🚀 ডাটাবেজে সেভ হওয়ার সাথে সাথে ক্লায়েন্ট স্টেট আপডেট করে পেন্ডিং স্ক্রিন লক করা হলো
       setHasProfile(true);
       setIsVerified(false);
-      
-      // ডাটাবেজ ক্যাশ পুরোপুরি ব্রেক করার জন্য একবার ফ্রেশ রিলোড
       window.location.reload();
     } else {
       setSubmitError(result.error || "Failed to submit profile. Please try again.");
@@ -87,10 +116,36 @@ export default function LawyerDashboard() {
     }
   };
 
-  // অ্যাপয়েন্টমেন্ট অ্যাকশন হ্যান্ডলার
-  const handleAppointmentAction = (id: string, actionType: "Approved" | "Rejected") => {
-    setAppointments(prev => prev.map(app => app.id === id ? { ...app, status: actionType } : app));
-  };
+  
+const handleAppointmentAction = async (id: string, actionType: "accepted" | "rejected") => {
+  const actionText = actionType === "accepted" ? "approve" : "reject";
+  
+  if (confirm(`Are you sure you want to ${actionText} this booking?`)) {
+    setLoading(true);
+    try {
+      if (actionType === "rejected") {
+        await cancelAppointment(id);
+        await loadIncomingBookings(); // সফলভাবে রিজেক্ট হলে লিস্ট আপডেট
+      } else if (actionType === "accepted") {
+        const res = await approveAppointment(id);
+        
+        // 👉 নিরাপদ অবজেক্ট চেকিং
+        if (res && res.success) {
+          // এপ্রুভ সফল হলে প্রথমে ডাটাবেজ থেকে নতুন ডাটা রি-লোডের জন্য স্টেট আপডেট করব
+          await loadIncomingBookings();
+        } else {
+          // শুধুমাত্র যদি আসলেই success ফেইল মারে (যেমন ডাটাবেজ অফলাইন) তখন এলার্ট দেবে
+          alert("Could not approve appointment. Try again.");
+        }
+      }
+    } catch (err) {
+      console.error("💥 Error executing appointment action:", err);
+      alert("An unexpected error occurred. Please refresh.");
+    } finally {
+      setLoading(false);
+    }
+  }
+};
 
   // ১. গ্লোবাল লোডিং স্টেট
   if (!isLoaded || loading) {
@@ -191,7 +246,7 @@ export default function LawyerDashboard() {
     );
   }
 
-  // ৩. প্রোফাইল সাবমিট করা আছে কিন্তু এডমিন এখনো এপ্রুভ করেনি (পেন্ডিং স্ক্রিন)
+  // ৩. ভেরিফিকেশন পেন্ডিং স্ক্রিন
   if (hasProfile && !isVerified) {
     return (
       <div className="flex min-h-screen flex-col bg-[#FAFAFA]">
@@ -210,7 +265,7 @@ export default function LawyerDashboard() {
     );
   }
 
-  // ৪. প্রোফাইল ১০০% অ্যাপ্রুভড (মেন ডায়নামিক পোর্টাল)
+  // ৪. প্রোফাইল ১০০% অ্যাপ্রুভড
   return (
     <div className="flex min-h-screen flex-col bg-[#FAFAFA]">
       <Navbar />
@@ -238,7 +293,7 @@ export default function LawyerDashboard() {
             <div>
               <span className="block text-xs text-gray-400 font-medium uppercase tracking-wider">Pending Approvals</span>
               <span className="text-xl font-bold text-gray-900">
-                {appointments.filter(r => r.status === "pending").length}
+                {appointments.filter(r => r.status?.toLowerCase() === "pending").length}
               </span>
             </div>
           </div>
@@ -250,7 +305,7 @@ export default function LawyerDashboard() {
             <div>
               <span className="block text-xs text-gray-400 font-medium uppercase tracking-wider">Active Sessions</span>
               <span className="text-xl font-bold text-gray-900">
-                {appointments.filter(r => r.status === "accepted").length}
+                {appointments.filter(r => r.status?.toLowerCase() === "confirmed" || r.status?.toLowerCase() === "approved").length}
               </span>
             </div>
           </div>
@@ -282,7 +337,8 @@ export default function LawyerDashboard() {
                   <div key={req.id} className="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-gray-50/30 transition-colors">
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold text-gray-900 text-base">{req.client?.name || "Anonymous Client"}</span>
+                        {/* 🚀 ফিক্সড ম্যাপিং: req.clientName রিড করা হচ্ছে */}
+                        <span className="font-semibold text-gray-900 text-base">{req.clientName || "Anonymous Client"}</span>
                         <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-md font-medium">Consultation</span>
                       </div>
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
@@ -292,32 +348,37 @@ export default function LawyerDashboard() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 pt-2 sm:pt-0 border-t sm:border-0 border-gray-50">
-                      {req.status === "pending" ? (
-                        <>
-                          <button
-                            onClick={() => handleAppointmentAction(req.id, "Approved")}
-                            className="p-2 rounded-xl bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
-                            title="Accept Consultation"
-                          >
-                            <Check className="h-4 w-4" />
-                          </button>
-                          <button
-                            onClick={() => handleAppointmentAction(req.id, "Rejected")}
-                            className="p-2 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100 transition-colors"
-                            title="Decline Request"
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
-                        </>
-                      ) : (
-                        <span className={`text-xs font-semibold px-3 py-1 rounded-full ${
-                          req.status === "accepted" ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
-                        }`}>
-                          {req.status}
-                        </span>
-                      )}
-                    </div>
+              <div className="flex items-center gap-2 pt-2 sm:pt-0 border-t sm:border-0 border-gray-50">
+  {req.status?.toLowerCase() === "pending" ? (
+    <>
+      <button
+        onClick={() => handleAppointmentAction(req.id, "accepted")}
+        className="p-2 rounded-xl bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
+        title="Accept Consultation"
+      >
+        <Check className="h-4 w-4" />
+      </button>
+      <button
+        onClick={() => handleAppointmentAction(req.id, "rejected")}
+        className="p-2 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100 transition-colors"
+        title="Decline Request"
+      >
+        <X className="h-4 w-4" />
+      </button>
+    </>
+  ) : (
+   
+    <span className={`text-xs font-semibold px-3 py-1 rounded-full uppercase ${
+      req.status?.toLowerCase() === "accepted" || 
+      req.status?.toLowerCase() === "approved" || 
+      req.status?.toLowerCase() === "confirmed" 
+        ? "bg-emerald-50 text-emerald-700" 
+        : "bg-rose-50 text-rose-700"
+    }`}>
+      {req.status}
+    </span>
+  )}
+</div>
                   </div>
                 ))}
 
@@ -330,7 +391,7 @@ export default function LawyerDashboard() {
             </div>
           </section>
 
-          {/* Right Sidebar Area: Compliance & Info Monitor */}
+          {/* Right Sidebar Area */}
           <aside className="space-y-6">
             <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm space-y-4">
               <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wider flex items-center gap-2">
@@ -352,7 +413,6 @@ export default function LawyerDashboard() {
               </div>
             </div>
 
-            {/* Anti-Circumvention Module */}
             <div className="bg-gray-900 text-white p-6 rounded-2xl shadow-sm relative overflow-hidden">
               <div className="relative z-10 space-y-2">
                 <h4 className="text-xs font-bold uppercase text-indigo-400 tracking-widest flex items-center gap-1">
